@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const DB_PATH = process.env.DB_PATH || '/data/clips.db';
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
+const PAY_PER_CLIP = Number(process.env.PAY_PER_CLIP || 20); // PHP per chosen clip
 
 if (!ADMIN_PASSWORD) console.warn('[warn] ADMIN_PASSWORD is not set — /admin will refuse all logins.');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -32,6 +33,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS clips (
   status TEXT NOT NULL DEFAULT 'new',
   created_at INTEGER NOT NULL
 )`);
+// migrations for older DBs
+const cols = db.prepare('PRAGMA table_info(clips)').all().map(c => c.name);
+if (!cols.includes('qr_hash')) db.exec('ALTER TABLE clips ADD COLUMN qr_hash TEXT');
+if (!cols.includes('paid_at')) db.exec('ALTER TABLE clips ADD COLUMN paid_at INTEGER');
 
 // ---------- helpers ----------
 function clipSlug(raw) {
@@ -167,6 +172,13 @@ button:hover,.btn:hover{background:#ffc95e}
 .flash{border-radius:10px;padding:14px 16px;margin-bottom:20px;font-weight:600}
 .flash.ok{background:#1d2a12;border:1px solid #3c5a24;color:var(--ok)}
 .flash.bad{background:#2a1512;border:1px solid #5a2c24;color:var(--bad)}
+.flash.pay{background:#241a06;border:1px solid #54400f;color:var(--text);font-weight:400}
+.flash.pay b{color:var(--honey)}
+.payrow{display:flex;gap:16px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px;flex-wrap:wrap}
+.payrow img{width:120px;height:120px;object-fit:contain;background:#fff;border-radius:8px;flex:0 0 auto}
+.payrow .who{flex:1;min-width:180px}
+.payrow .amt{font-family:Silkscreen,monospace;font-size:20px;color:var(--honey)}
+.warn{color:var(--bad);font-size:13px;margin-top:4px}
 .clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:18px}
 .clip.done{opacity:.55}
 .cliphead{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}
@@ -187,9 +199,18 @@ app.get('/', (req, res) => {
   const ok = 'ok' in req.query, err = req.query.err;
   res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>halvixiepie clips</title>${STYLE}</head><body><div class="wrap">
+<title>halvixiepie clips</title>
+<meta property="og:title" content="halvixiepie clips 🍯">
+<meta property="og:description" content="Clip funny, amazing moments of your favorite streamers and get ₱${PAY_PER_CLIP} per clip!">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://clips.halvixiepie.online/">
+<meta property="og:site_name" content="halvixiepie">
+<meta name="description" content="Clip funny, amazing moments of your favorite streamers and get ₱${PAY_PER_CLIP} per clip!">
+<meta name="theme-color" content="#ffb62e">
+${STYLE}</head><body><div class="wrap">
 <header><div class="hex">▶</div>
 <h1>SEND A CLIP<span class="sub">Submit your favorite moments for the weekly halvixiepie recap</span></h1></header>
+<div class="flash pay">🍯 <b>₱${PAY_PER_CLIP} per clip</b> — if your clip is chosen for the weekly recap video, you get ₱${PAY_PER_CLIP} sent to the QRPH/GCash QR you upload. Multiple chosen clips stack. Payouts go out after the recap is posted.</div>
 ${ok ? `<div class="flash ok">Clip received! If it makes the recap, your QR gets the honey. 🍯</div>` : ''}
 ${err ? `<div class="flash bad">${esc(err)}</div>` : ''}
 <form class="card" method="post" action="/submit" enctype="multipart/form-data">
@@ -221,8 +242,9 @@ app.post('/submit', (req, res) => {
     if (!slug) return fail("That doesn't look like a Twitch clip link. Use the clip's Share button.");
     if (!req.file) return fail('QR code image is required (PNG, JPG, or WebP).');
     if (!cooldownOk(req.ip)) return fail('Easy there — wait 30 seconds between submissions.');
-    db.prepare('INSERT INTO clips (title,url,slug,username,qr_file,created_at) VALUES (?,?,?,?,?,?)')
-      .run(title.trim().slice(0, 120), String(url).trim(), slug, username.trim().slice(0, 40), req.file.filename, Date.now());
+    const qrHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(UPLOAD_DIR, req.file.filename))).digest('hex');
+    db.prepare('INSERT INTO clips (title,url,slug,username,qr_file,qr_hash,created_at) VALUES (?,?,?,?,?,?,?)')
+      .run(title.trim().slice(0, 120), String(url).trim(), slug, username.trim().slice(0, 40), req.file.filename, qrHash, Date.now());
     res.redirect('/?ok');
   });
 });
@@ -252,9 +274,10 @@ app.get('/admin', requireAdmin, (req, res) => {
   const rows = showDone
     ? db.prepare('SELECT * FROM clips ORDER BY id DESC').all()
     : db.prepare("SELECT * FROM clips WHERE status='new' ORDER BY id DESC").all();
+  const owed = db.prepare("SELECT COUNT(*) n FROM clips WHERE status='chosen'").get().n * PAY_PER_CLIP;
   const host = req.hostname; // parent param for the Twitch embed
   const cards = rows.map(r => `
-<div class="clip${r.status === 'done' ? ' done' : ''}">
+<div class="clip${r.status === 'passed' || r.status === 'paid' ? ' done' : ''}">
   <div class="cliphead"><b>${esc(r.title)}</b>
     <span class="meta">from <b>${esc(r.username)}</b> · ${new Date(r.created_at).toLocaleString()} · <span class="tag">${r.status.toUpperCase()}</span></span></div>
   <div class="meta"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></div>
@@ -266,10 +289,14 @@ app.get('/admin', requireAdmin, (req, res) => {
   </details>
   <div class="actions">
     <a class="btn" href="/admin/download/${r.id}">⬇ Download MP4</a>
-    <form method="post" action="/admin/status/${r.id}" style="display:inline">
-      <input type="hidden" name="to" value="${r.status === 'done' ? 'new' : 'done'}">
-      <button class="btn ghost" type="submit">${r.status === 'done' ? 'Mark as new' : 'Mark as done'}</button>
-    </form>
+    ${r.status !== 'chosen' && r.status !== 'paid' ? `<form method="post" action="/admin/status/${r.id}" style="display:inline">
+      <input type="hidden" name="to" value="chosen">
+      <button class="btn" type="submit">⭐ Choose clip (+₱${PAY_PER_CLIP})</button>
+    </form>` : ''}
+    ${r.status !== 'paid' ? `<form method="post" action="/admin/status/${r.id}" style="display:inline">
+      <input type="hidden" name="to" value="${r.status === 'passed' ? 'new' : 'passed'}">
+      <button class="btn ghost" type="submit">${r.status === 'passed' ? 'Back to new' : 'Pass'}</button>
+    </form>` : ''}
     <form method="post" action="/admin/delete/${r.id}" style="display:inline" onsubmit="return confirm('Delete this submission and its QR image?')">
       <button class="btn ghost" type="submit">Delete</button>
     </form>
@@ -280,7 +307,8 @@ app.get('/admin', requireAdmin, (req, res) => {
 <body><div class="wrap wide"><header><div class="hex">▶</div>
 <h1>CLIP INBOX<span class="sub">${rows.length} ${showDone ? 'total' : 'new'} · downloads land in your browser's download folder</span></h1></header>
 <div class="actions" style="margin-bottom:20px">
-  <a class="btn ghost" href="${showDone ? '/admin' : '/admin?all'}">${showDone ? 'Show new only' : 'Show all (incl. done)'}</a>
+  <a class="btn" href="/admin/payout">🍯 Payouts${owed ? ` — ₱${owed} owed` : ''}</a>
+  <a class="btn ghost" href="${showDone ? '/admin' : '/admin?all'}">${showDone ? 'Show new only' : 'Show all statuses'}</a>
   <a class="btn ghost" href="/">View public form</a>
 </div>
 ${cards || '<div class="card">No clips in the hive yet. Share the form link with the community.</div>'}
@@ -312,10 +340,54 @@ app.get('/admin/download/:id', requireAdmin, async (req, res) => {
   }
 });
 
+app.get('/admin/payout', requireAdmin, (req, res) => {
+  // outstanding: chosen-but-unpaid clips grouped by twitch name (case-insensitive)
+  const owed = db.prepare(`SELECT lower(username) u, COUNT(*) n, MAX(id) latest
+    FROM clips WHERE status='chosen' GROUP BY lower(username) ORDER BY n DESC`).all();
+  const rows = owed.map(g => {
+    const latest = db.prepare('SELECT username, qr_file FROM clips WHERE id=?').get(g.latest);
+    const hashes = db.prepare(`SELECT COUNT(DISTINCT qr_hash) c FROM clips
+      WHERE lower(username)=? AND status='chosen' AND qr_hash IS NOT NULL`).get(g.u).c;
+    const titles = db.prepare(`SELECT title FROM clips WHERE lower(username)=? AND status='chosen' ORDER BY id`).all(g.u)
+      .map(t => esc(t.title)).join(', ');
+    return `<div class="payrow">
+      ${latest.qr_file ? `<img src="/admin/qr/${g.latest}" alt="QR for ${esc(latest.username)}">` : ''}
+      <div class="who"><b>${esc(latest.username)}</b> — ${g.n} clip${g.n > 1 ? 's' : ''} chosen
+        <div class="meta">${titles}</div>
+        ${hashes > 1 ? `<div class="warn">⚠ This user's chosen clips have ${hashes} different QR codes — open each clip in the inbox and check before paying.</div>` : ''}
+      </div>
+      <div class="amt">₱${g.n * PAY_PER_CLIP}</div>
+      <form method="post" action="/admin/payout/pay" onsubmit="return confirm('Mark ₱${g.n * PAY_PER_CLIP} to ${esc(latest.username)} as paid? Do this AFTER you\\'ve actually sent it.')">
+        <input type="hidden" name="u" value="${esc(g.u)}">
+        <button class="btn" type="submit">Mark paid</button>
+      </form>
+    </div>`;
+  }).join('');
+  const totalOwed = owed.reduce((s, g) => s + g.n, 0) * PAY_PER_CLIP;
+  const history = db.prepare(`SELECT lower(username) u, MAX(username) name, COUNT(*) n, MAX(paid_at) last
+    FROM clips WHERE status='paid' GROUP BY lower(username) ORDER BY last DESC`).all()
+    .map(h => `<div class="meta" style="margin-bottom:6px"><b style="color:var(--text)">${esc(h.name)}</b> — ₱${h.n * PAY_PER_CLIP} total (${h.n} clip${h.n > 1 ? 's' : ''}), last paid ${h.last ? new Date(h.last).toLocaleDateString() : '—'}</div>`).join('');
+  res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>payouts</title>${STYLE}</head>
+<body><div class="wrap wide"><header><div class="hex">🍯</div>
+<h1>PAYOUTS<span class="sub">₱${PAY_PER_CLIP} per chosen clip · scan the QR, send the honey, then hit Mark paid</span></h1></header>
+<div class="actions" style="margin-bottom:20px"><a class="btn ghost" href="/admin">← Back to inbox</a></div>
+${rows || `<div class="card">Nobody is owed anything right now. Choose clips in the inbox and the tally shows up here.</div>`}
+${rows ? `<div class="card" style="margin-top:6px;text-align:right"><span class="amt" style="font-family:Silkscreen;color:var(--honey)">Total owed: ₱${totalOwed}</span></div>` : ''}
+${history ? `<h1 style="font-size:16px;margin:32px 0 14px">PAID HISTORY</h1><div class="card">${history}</div>` : ''}
+</div></body></html>`);
+});
+
+app.post('/admin/payout/pay', requireAdmin, (req, res) => {
+  db.prepare(`UPDATE clips SET status='paid', paid_at=? WHERE lower(username)=? AND status='chosen'`)
+    .run(Date.now(), String(req.body.u || '').toLowerCase());
+  res.redirect('/admin/payout');
+});
+
 app.post('/admin/status/:id', requireAdmin, (req, res) => {
-  const to = req.body.to === 'done' ? 'done' : 'new';
+  const to = ['chosen', 'passed', 'new'].includes(req.body.to) ? req.body.to : 'new';
   db.prepare('UPDATE clips SET status=? WHERE id=?').run(to, req.params.id);
-  res.redirect('/admin');
+  res.redirect('/admin' + (req.get('referer')?.includes('all') ? '?all' : ''));
 });
 
 app.post('/admin/delete/:id', requireAdmin, (req, res) => {
