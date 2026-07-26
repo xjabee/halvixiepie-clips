@@ -15,6 +15,8 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const DB_PATH = process.env.DB_PATH || '/data/clips.db';
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
 const PAY_PER_CLIP = Number(process.env.PAY_PER_CLIP || 20); // PHP per chosen clip
+const STREAMERS = (process.env.STREAMERS || 'xjabee,itshoneypie__,halcyon_aurora,elovixie,idlecai')
+  .split(',').map(s => s.trim()).filter(Boolean); // the stream circle; everything else files under "others"
 
 if (!ADMIN_PASSWORD) console.warn('[warn] ADMIN_PASSWORD is not set — /admin will refuse all logins.');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -37,6 +39,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS clips (
 const cols = db.prepare('PRAGMA table_info(clips)').all().map(c => c.name);
 if (!cols.includes('qr_hash')) db.exec('ALTER TABLE clips ADD COLUMN qr_hash TEXT');
 if (!cols.includes('paid_at')) db.exec('ALTER TABLE clips ADD COLUMN paid_at INTEGER');
+if (!cols.includes('streamer')) {
+  db.exec("ALTER TABLE clips ADD COLUMN streamer TEXT");
+  db.exec("UPDATE clips SET streamer='others' WHERE streamer IS NULL");
+}
 
 // ---------- helpers ----------
 function clipSlug(raw) {
@@ -88,7 +94,10 @@ async function resolveClipMp4(slug) {
 }
 
 // ---------- admin auth (cookie) ----------
-const SESSION_SECRET = crypto.randomBytes(32).toString('hex'); // sessions reset on redeploy, that's fine
+// Session token is derived from ADMIN_PASSWORD, so logins survive redeploys.
+// Changing the password (or setting a new SESSION_SECRET) logs every device out.
+const SESSION_SECRET = process.env.SESSION_SECRET
+  || crypto.createHash('sha256').update('halvixiepie-clips::' + ADMIN_PASSWORD).digest('hex');
 function adminToken() {
   return crypto.createHmac('sha256', SESSION_SECRET).update('admin').digest('hex');
 }
@@ -179,6 +188,22 @@ button:hover,.btn:hover{background:#ffc95e}
 .payrow .who{flex:1;min-width:180px}
 .payrow .amt{font-family:Silkscreen,monospace;font-size:20px;color:var(--honey)}
 .warn{color:var(--bad);font-size:13px;margin-top:4px}
+select{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);
+  padding:11px 12px;font:inherit;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23c98d1e' stroke-width='2'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 14px center}
+select:focus{outline:2px solid var(--honey);outline-offset:1px;border-color:transparent}
+.modal{position:fixed;inset:0;background:rgba(10,7,2,.75);display:grid;place-items:center;padding:20px;z-index:50}
+.modalbox{background:var(--panel2);border:2px solid var(--honey);border-radius:14px;max-width:420px;padding:26px;text-align:center;
+  box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.modalbox .hex{margin:0 auto 14px}
+.modalbox h2{font-family:Silkscreen,monospace;font-size:14px;color:var(--honey);letter-spacing:1px;margin:0 0 10px}
+.modalbox p{margin:0 0 20px;color:var(--text);line-height:1.6}
+.filterbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+.filterbar a{font-family:Silkscreen,monospace;font-size:11px;letter-spacing:1px;padding:7px 12px;border-radius:8px;
+  border:1px solid var(--line);color:var(--muted);text-decoration:none}
+.filterbar a.on{background:var(--honey);color:#140e05;border-color:var(--honey)}
+.filterbar a:not(.on):hover{background:var(--panel2);color:var(--honey)}
 .clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:18px}
 .clip.done{opacity:.55}
 .cliphead{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}
@@ -219,32 +244,56 @@ ${err ? `<div class="flash bad">${esc(err)}</div>` : ''}
   <label for="url">Twitch clip link</label>
   <input type="url" id="url" name="url" required placeholder="https://clips.twitch.tv/...">
   <div class="hint">Paste the link from the clip's Share button — clips.twitch.tv/... or twitch.tv/channel/clip/...</div>
+  <label for="streamer">Whose stream is it from?</label>
+  <select id="streamer" name="streamer" required>
+    <option value="" disabled selected>Pick a streamer</option>
+    ${STREAMERS.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}
+    <option value="others">Someone else (others)</option>
+  </select>
   <label for="username">Twitch username</label>
   <input type="text" id="username" name="username" maxlength="40" required placeholder="your twitch name">
   <label for="qr">QRPH / GCash QR code</label>
   <input type="file" id="qr" name="qr" accept="image/png,image/jpeg,image/webp" required>
   <div class="hint">PNG, JPG, or WebP, up to 5 MB. Only the recap crew can see it.</div>
   <div class="submitrow"><button type="submit">Drop it in the hive</button></div>
+  <div class="hint" style="margin-top:16px">⚠ Clips from outside the stream circle: I appreciate the clip and will check it out, but the chances of it making it into the video are slim!</div>
 </form>
+<div class="modal" id="othersModal" hidden>
+  <div class="modalbox">
+    <div class="hex">!</div>
+    <h2>HEADS UP</h2>
+    <p>This clip doesn't belong to the stream circle — I appreciate the clip and will check it out, but the chances of it making it into the video are slim!</p>
+    <button type="button" onclick="document.getElementById('othersModal').hidden=true">Got it, submitting anyway</button>
+  </div>
+</div>
+<script>
+document.getElementById('streamer').addEventListener('change', function () {
+  if (this.value === 'others') document.getElementById('othersModal').hidden = false;
+});
+document.getElementById('othersModal').addEventListener('click', function (e) {
+  if (e.target === this) this.hidden = true;
+});
+</script>
 </div></body></html>`);
 });
 
 app.post('/submit', (req, res) => {
   upload.single('qr')(req, res, err => {
     if (err) return res.redirect('/?err=' + encodeURIComponent('Image too large (5 MB max).'));
-    const { title, url, username } = req.body || {};
+    const { title, url, username, streamer } = req.body || {};
     const slug = clipSlug(url);
     const fail = m => {
       if (req.file) fs.unlink(path.join(UPLOAD_DIR, req.file.filename), () => {});
       res.redirect('/?err=' + encodeURIComponent(m));
     };
     if (!title?.trim() || !username?.trim()) return fail('Title and username are required.');
+    if (!streamer || (!STREAMERS.includes(streamer) && streamer !== 'others')) return fail('Pick whose stream the clip is from.');
     if (!slug) return fail("That doesn't look like a Twitch clip link. Use the clip's Share button.");
     if (!req.file) return fail('QR code image is required (PNG, JPG, or WebP).');
     if (!cooldownOk(req.ip)) return fail('Easy there — wait 30 seconds between submissions.');
     const qrHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(UPLOAD_DIR, req.file.filename))).digest('hex');
-    db.prepare('INSERT INTO clips (title,url,slug,username,qr_file,qr_hash,created_at) VALUES (?,?,?,?,?,?,?)')
-      .run(title.trim().slice(0, 120), String(url).trim(), slug, username.trim().slice(0, 40), req.file.filename, qrHash, Date.now());
+    db.prepare('INSERT INTO clips (title,url,slug,username,qr_file,qr_hash,streamer,created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(title.trim().slice(0, 120), String(url).trim(), slug, username.trim().slice(0, 40), req.file.filename, qrHash, streamer, Date.now());
     res.redirect('/?ok');
   });
 });
@@ -263,7 +312,7 @@ ${'err' in req.query ? '<div class="flash bad">Wrong password.</div>' : ''}
 app.post('/admin/login', (req, res) => {
   if (ADMIN_PASSWORD && req.body.pw === ADMIN_PASSWORD) {
     const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
-    res.setHeader('Set-Cookie', `adm=${adminToken()}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax${secure}`);
+    res.setHeader('Set-Cookie', `adm=${adminToken()}; HttpOnly; Path=/; Max-Age=2592000; SameSite=Lax${secure}`);
     return res.redirect('/admin');
   }
   res.redirect('/admin/login?err');
@@ -271,15 +320,21 @@ app.post('/admin/login', (req, res) => {
 
 app.get('/admin', requireAdmin, (req, res) => {
   const showDone = 'all' in req.query;
-  const rows = showDone
-    ? db.prepare('SELECT * FROM clips ORDER BY id DESC').all()
-    : db.prepare("SELECT * FROM clips WHERE status='new' ORDER BY id DESC").all();
+  const sFilter = req.query.s && (STREAMERS.includes(req.query.s) || req.query.s === 'others') ? req.query.s : null;
+  const where = [showDone ? '1=1' : "status='new'", sFilter ? 'streamer=?' : '1=1'].join(' AND ');
+  const rows = db.prepare(`SELECT * FROM clips WHERE ${where} ORDER BY id DESC`).all(...(sFilter ? [sFilter] : []));
   const owed = db.prepare("SELECT COUNT(*) n FROM clips WHERE status='chosen'").get().n * PAY_PER_CLIP;
+  const qs = s => '/admin?' + [showDone ? 'all' : '', s ? 's=' + encodeURIComponent(s) : ''].filter(Boolean).join('&');
+  const filterbar = `<div class="filterbar">
+    <a class="${!sFilter ? 'on' : ''}" href="${qs(null)}">ALL</a>
+    ${STREAMERS.map(s => `<a class="${sFilter === s ? 'on' : ''}" href="${qs(s)}">${esc(s.toUpperCase())}</a>`).join('')}
+    <a class="${sFilter === 'others' ? 'on' : ''}" href="${qs('others')}">OTHERS</a>
+  </div>`;
   const host = req.hostname; // parent param for the Twitch embed
   const cards = rows.map(r => `
 <div class="clip${r.status === 'passed' || r.status === 'paid' ? ' done' : ''}">
   <div class="cliphead"><b>${esc(r.title)}</b>
-    <span class="meta">from <b>${esc(r.username)}</b> · ${new Date(r.created_at).toLocaleString()} · <span class="tag">${r.status.toUpperCase()}</span></span></div>
+    <span class="meta">from <b>${esc(r.username)}</b> · <span class="tag">📺 ${esc(r.streamer || 'others')}</span> · ${new Date(r.created_at).toLocaleString()} · <span class="tag">${r.status.toUpperCase()}</span></span></div>
   <div class="meta"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></div>
   <details><summary class="meta" style="cursor:pointer;margin-top:10px">Preview clip</summary>
     <div class="embed"><iframe loading="lazy" src="https://clips.twitch.tv/embed?clip=${encodeURIComponent(r.slug)}&parent=${encodeURIComponent(host)}&autoplay=false" allowfullscreen></iframe></div>
@@ -305,10 +360,11 @@ app.get('/admin', requireAdmin, (req, res) => {
   res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>clips admin</title>${STYLE}</head>
 <body><div class="wrap wide"><header><div class="hex">▶</div>
-<h1>CLIP INBOX<span class="sub">${rows.length} ${showDone ? 'total' : 'new'} · downloads land in your browser's download folder</span></h1></header>
+<h1>CLIP INBOX<span class="sub">${rows.length} ${showDone ? 'total' : 'new'}${sFilter ? ` · ${esc(sFilter)}` : ''} · downloads land in your browser's download folder</span></h1></header>
+${filterbar}
 <div class="actions" style="margin-bottom:20px">
   <a class="btn" href="/admin/payout">💸 Payouts${owed ? ` — ₱${owed} owed` : ''}</a>
-  <a class="btn ghost" href="${showDone ? '/admin' : '/admin?all'}">${showDone ? 'Show new only' : 'Show all statuses'}</a>
+  <a class="btn ghost" href="/admin?${[showDone ? '' : 'all', sFilter ? 's=' + encodeURIComponent(sFilter) : ''].filter(Boolean).join('&')}">${showDone ? 'Show new only' : 'Show all statuses'}</a>
   <a class="btn ghost" href="/">View public form</a>
 </div>
 ${cards || '<div class="card">No clips in the hive yet. Share the form link with the community.</div>'}
