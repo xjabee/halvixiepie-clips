@@ -44,6 +44,7 @@ if (!cols.includes('streamer')) {
   db.exec("UPDATE clips SET streamer='others' WHERE streamer IS NULL");
 }
 if (!cols.includes('playlist')) db.exec('ALTER TABLE clips ADD COLUMN playlist INTEGER DEFAULT 0');
+if (!cols.includes('broadcaster')) db.exec('ALTER TABLE clips ADD COLUMN broadcaster TEXT');
 
 // ---------- helpers ----------
 function clipSlug(raw) {
@@ -92,6 +93,29 @@ async function resolveClipMp4(slug) {
   if (!qualities?.length || !token?.signature || !token?.value) throw new Error('Clip not found or token missing');
   // qualities come highest-first; [0] is source quality
   return `${qualities[0].sourceURL}?sig=${token.signature}&token=${encodeURIComponent(token.value)}`;
+}
+
+// Look up which channel a clip belongs to. null = clip doesn't exist.
+const bcCache = new Map(); // slug -> {login, displayName}
+async function resolveBroadcaster(slug) {
+  if (bcCache.has(slug)) return bcCache.get(slug);
+  const res = await fetch('https://gql.twitch.tv/gql', {
+    method: 'POST',
+    headers: { 'Client-ID': TWITCH_GQL_CLIENT_ID, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: 'query($slug:ID!){clip(slug:$slug){broadcaster{login displayName}}}',
+      variables: { slug }
+    })
+  });
+  if (!res.ok) throw new Error('Twitch GQL returned ' + res.status);
+  const j = await res.json();
+  const bc = j?.data?.clip?.broadcaster || null;
+  if (bcCache.size > 2000) bcCache.clear();
+  bcCache.set(slug, bc);
+  return bc;
+}
+function circleMatch(login) {
+  return STREAMERS.find(s => s.toLowerCase() === String(login).toLowerCase()) || null;
 }
 
 // ---------- admin auth (cookie) ----------
@@ -259,12 +283,7 @@ ${err ? `<div class="flash bad">${esc(err)}</div>` : ''}
   <label for="url">Twitch clip link</label>
   <input type="url" id="url" name="url" required placeholder="https://clips.twitch.tv/...">
   <div class="hint">Paste the link from the clip's Share button — clips.twitch.tv/... or twitch.tv/channel/clip/...</div>
-  <label for="streamer">Whose stream is it from?</label>
-  <select id="streamer" name="streamer" required>
-    <option value="" disabled selected>Pick a streamer</option>
-    ${STREAMERS.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}
-    <option value="others">Someone else (others)</option>
-  </select>
+  <div class="hint" id="detect" style="color:var(--honey)"></div>
   <label for="username">Twitch username</label>
   <input type="text" id="username" name="username" maxlength="40" required placeholder="your twitch name">
   <label for="qr">QRPH / GCash QR code</label>
@@ -282,9 +301,26 @@ ${err ? `<div class="flash bad">${esc(err)}</div>` : ''}
   </div>
 </div>
 <script>
-document.getElementById('streamer').addEventListener('change', function () {
-  if (this.value === 'others') document.getElementById('othersModal').hidden = false;
-});
+const urlIn = document.getElementById('url');
+const det = document.getElementById('detect');
+let warned = false, timer;
+urlIn.addEventListener('input', () => { clearTimeout(timer); warned = false; timer = setTimeout(check, 600); });
+async function check() {
+  const v = urlIn.value.trim();
+  det.textContent = '';
+  if (!v || !/twitch\.tv/.test(v)) return;
+  det.textContent = 'Checking clip…';
+  try {
+    const r = await fetch('/api/clipinfo?url=' + encodeURIComponent(v));
+    const j = await r.json();
+    if (!j.ok) {
+      det.textContent = j.reason === 'notfound' ? "⚠ Couldn't find that clip on Twitch — check the link." : '';
+      return;
+    }
+    det.textContent = '✓ Clip from ' + j.display + (j.circle ? '' : ' — outside the stream circle');
+    if (!j.circle && !warned) { warned = true; document.getElementById('othersModal').hidden = false; }
+  } catch (e) { det.textContent = ''; }
+}
 document.getElementById('othersModal').addEventListener('click', function (e) {
   if (e.target === this) this.hidden = true;
 });
@@ -292,23 +328,46 @@ document.getElementById('othersModal').addEventListener('click', function (e) {
 </div></body></html>`);
 });
 
+// lightweight lookup used by the form's live detection
+app.get('/api/clipinfo', async (req, res) => {
+  const slug = clipSlug(req.query.url);
+  if (!slug) return res.json({ ok: false, reason: 'badlink' });
+  try {
+    const bc = await resolveBroadcaster(slug);
+    if (!bc) return res.json({ ok: false, reason: 'notfound' });
+    const match = circleMatch(bc.login);
+    res.json({ ok: true, login: bc.login, display: bc.displayName || bc.login, circle: !!match });
+  } catch (e) {
+    res.json({ ok: false, reason: 'error' });
+  }
+});
+
 app.post('/submit', (req, res) => {
-  upload.single('qr')(req, res, err => {
+  upload.single('qr')(req, res, async err => {
     if (err) return res.redirect('/?err=' + encodeURIComponent('Image too large (5 MB max).'));
-    const { title, url, username, streamer } = req.body || {};
+    const { title, url, username } = req.body || {};
     const slug = clipSlug(url);
     const fail = m => {
       if (req.file) fs.unlink(path.join(UPLOAD_DIR, req.file.filename), () => {});
       res.redirect('/?err=' + encodeURIComponent(m));
     };
     if (!title?.trim() || !username?.trim()) return fail('Title and username are required.');
-    if (!streamer || (!STREAMERS.includes(streamer) && streamer !== 'others')) return fail('Pick whose stream the clip is from.');
     if (!slug) return fail("That doesn't look like a Twitch clip link. Use the clip's Share button.");
     if (!req.file) return fail('QR code image is required (PNG, JPG, or WebP).');
     if (!cooldownOk(req.ip)) return fail('Easy there — wait 30 seconds between submissions.');
+    // auto-detect whose channel the clip is from
+    let streamer = 'others', broadcaster = null;
+    try {
+      const bc = await resolveBroadcaster(slug);
+      if (!bc) return fail("Couldn't find that clip on Twitch — double-check the link.");
+      broadcaster = bc.login;
+      streamer = circleMatch(bc.login) || 'others';
+    } catch (e) {
+      console.warn('broadcaster lookup failed, filing under others:', e.message);
+    }
     const qrHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(UPLOAD_DIR, req.file.filename))).digest('hex');
-    db.prepare('INSERT INTO clips (title,url,slug,username,qr_file,qr_hash,streamer,created_at) VALUES (?,?,?,?,?,?,?,?)')
-      .run(title.trim().slice(0, 120), String(url).trim(), slug, username.trim().slice(0, 40), req.file.filename, qrHash, streamer, Date.now());
+    db.prepare('INSERT INTO clips (title,url,slug,username,qr_file,qr_hash,streamer,broadcaster,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(title.trim().slice(0, 120), String(url).trim(), slug, username.trim().slice(0, 40), req.file.filename, qrHash, streamer, broadcaster, Date.now());
     res.redirect('/?ok');
   });
 });
@@ -350,7 +409,7 @@ app.get('/admin', requireAdmin, (req, res) => {
   const cards = rows.map(r => `
 <div class="clip${r.status === 'passed' || r.status === 'paid' ? ' done' : ''}">
   <div class="cliphead"><b>${esc(r.title)}</b>
-    <span class="meta">from <b>${esc(r.username)}</b> · <span class="tag">📺 ${esc(r.streamer || 'others')}</span> · ${new Date(r.created_at).toLocaleString()} · <span class="tag">${r.status.toUpperCase()}</span>${r.playlist ? ' · <span class="tag">▶ PLAYLIST</span>' : ''}</span></div>
+    <span class="meta">from <b>${esc(r.username)}</b> · <span class="tag">📺 ${esc(r.streamer || 'others')}${r.streamer === 'others' && r.broadcaster ? ' (' + esc(r.broadcaster) + ')' : ''}</span> · ${new Date(r.created_at).toLocaleString()} · <span class="tag">${r.status.toUpperCase()}</span>${r.playlist ? ' · <span class="tag">▶ PLAYLIST</span>' : ''}</span></div>
   <div class="meta"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></div>
   <details><summary class="meta" style="cursor:pointer;margin-top:10px">Preview clip</summary>
     <div class="embed"><iframe loading="lazy" src="https://clips.twitch.tv/embed?clip=${encodeURIComponent(r.slug)}&parent=${encodeURIComponent(host)}&autoplay=false" allowfullscreen></iframe></div>
