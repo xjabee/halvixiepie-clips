@@ -43,6 +43,7 @@ if (!cols.includes('streamer')) {
   db.exec("ALTER TABLE clips ADD COLUMN streamer TEXT");
   db.exec("UPDATE clips SET streamer='others' WHERE streamer IS NULL");
 }
+if (!cols.includes('playlist')) db.exec('ALTER TABLE clips ADD COLUMN playlist INTEGER DEFAULT 0');
 
 // ---------- helpers ----------
 function clipSlug(raw) {
@@ -194,6 +195,7 @@ select{width:100%;background:var(--bg);border:1px solid var(--line);border-radiu
   background-repeat:no-repeat;background-position:right 14px center}
 select:focus{outline:2px solid var(--honey);outline-offset:1px;border-color:transparent}
 .modal{position:fixed;inset:0;background:rgba(10,7,2,.75);display:grid;place-items:center;padding:20px;z-index:50}
+.modal[hidden]{display:none}
 .modalbox{background:var(--panel2);border:2px solid var(--honey);border-radius:14px;max-width:420px;padding:26px;text-align:center;
   box-shadow:0 20px 60px rgba(0,0,0,.6)}
 .modalbox .hex{margin:0 auto 14px}
@@ -204,6 +206,19 @@ select:focus{outline:2px solid var(--honey);outline-offset:1px;border-color:tran
   border:1px solid var(--line);color:var(--muted);text-decoration:none}
 .filterbar a.on{background:var(--honey);color:#140e05;border-color:var(--honey)}
 .filterbar a:not(.on):hover{background:var(--panel2);color:var(--honey)}
+.plwrap{display:grid;gap:18px}
+.plplayer{aspect-ratio:16/9;width:100%;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#000}
+.plplayer iframe{width:100%;height:100%;border:0}
+.plctrl{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.plcount{font-family:Silkscreen,monospace;font-size:12px;color:var(--muted);margin-left:auto}
+.pllist{list-style:none;margin:0;padding:0}
+.pllist li{display:flex;gap:10px;align-items:baseline;padding:11px 14px;border:1px solid var(--line);border-radius:10px;
+  margin-bottom:8px;cursor:pointer;background:var(--panel)}
+.pllist li:hover{border-color:#54400f}
+.pllist li.on{border-color:var(--honey);background:var(--panel2)}
+.pllist .num{font-family:Silkscreen,monospace;font-size:11px;color:var(--honey-dim);flex:0 0 auto}
+.pllist .t{font-weight:600}
+.pllist .m{font-size:12px;color:var(--muted);margin-left:auto;text-align:right}
 .clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:18px}
 .clip.done{opacity:.55}
 .cliphead{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}
@@ -324,6 +339,7 @@ app.get('/admin', requireAdmin, (req, res) => {
   const where = [showDone ? '1=1' : "status='new'", sFilter ? 'streamer=?' : '1=1'].join(' AND ');
   const rows = db.prepare(`SELECT * FROM clips WHERE ${where} ORDER BY id DESC`).all(...(sFilter ? [sFilter] : []));
   const owed = db.prepare("SELECT COUNT(*) n FROM clips WHERE status='chosen'").get().n * PAY_PER_CLIP;
+  const plCount = db.prepare('SELECT COUNT(*) n FROM clips WHERE playlist=1').get().n;
   const qs = s => '/admin?' + [showDone ? 'all' : '', s ? 's=' + encodeURIComponent(s) : ''].filter(Boolean).join('&');
   const filterbar = `<div class="filterbar">
     <a class="${!sFilter ? 'on' : ''}" href="${qs(null)}">ALL</a>
@@ -334,7 +350,7 @@ app.get('/admin', requireAdmin, (req, res) => {
   const cards = rows.map(r => `
 <div class="clip${r.status === 'passed' || r.status === 'paid' ? ' done' : ''}">
   <div class="cliphead"><b>${esc(r.title)}</b>
-    <span class="meta">from <b>${esc(r.username)}</b> · <span class="tag">📺 ${esc(r.streamer || 'others')}</span> · ${new Date(r.created_at).toLocaleString()} · <span class="tag">${r.status.toUpperCase()}</span></span></div>
+    <span class="meta">from <b>${esc(r.username)}</b> · <span class="tag">📺 ${esc(r.streamer || 'others')}</span> · ${new Date(r.created_at).toLocaleString()} · <span class="tag">${r.status.toUpperCase()}</span>${r.playlist ? ' · <span class="tag">▶ PLAYLIST</span>' : ''}</span></div>
   <div class="meta"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></div>
   <details><summary class="meta" style="cursor:pointer;margin-top:10px">Preview clip</summary>
     <div class="embed"><iframe loading="lazy" src="https://clips.twitch.tv/embed?clip=${encodeURIComponent(r.slug)}&parent=${encodeURIComponent(host)}&autoplay=false" allowfullscreen></iframe></div>
@@ -348,6 +364,9 @@ app.get('/admin', requireAdmin, (req, res) => {
       <input type="hidden" name="to" value="chosen">
       <button class="btn" type="submit">⭐ Choose clip (+₱${PAY_PER_CLIP})</button>
     </form>` : ''}
+    <form method="post" action="/admin/playlist/${r.id}" style="display:inline">
+      <button class="btn ghost" type="submit">${r.playlist ? '✕ Remove from playlist' : '▶ Add to playlist'}</button>
+    </form>
     ${r.status !== 'paid' ? `<form method="post" action="/admin/status/${r.id}" style="display:inline">
       <input type="hidden" name="to" value="${r.status === 'passed' ? 'new' : 'passed'}">
       <button class="btn ghost" type="submit">${r.status === 'passed' ? 'Back to new' : 'Pass'}</button>
@@ -364,6 +383,7 @@ app.get('/admin', requireAdmin, (req, res) => {
 ${filterbar}
 <div class="actions" style="margin-bottom:20px">
   <a class="btn" href="/admin/payout">💸 Payouts${owed ? ` — ₱${owed} owed` : ''}</a>
+  <a class="btn ghost" href="/playlist" target="_blank">▶ Playlist (${plCount})</a>
   <a class="btn ghost" href="/admin?${[showDone ? '' : 'all', sFilter ? 's=' + encodeURIComponent(sFilter) : ''].filter(Boolean).join('&')}">${showDone ? 'Show new only' : 'Show all statuses'}</a>
   <a class="btn ghost" href="/">View public form</a>
 </div>
@@ -438,6 +458,67 @@ app.post('/admin/payout/pay', requireAdmin, (req, res) => {
   db.prepare(`UPDATE clips SET status='paid', paid_at=? WHERE lower(username)=? AND status='chosen'`)
     .run(Date.now(), String(req.body.u || '').toLowerCase());
   res.redirect('/admin/payout');
+});
+
+app.post('/admin/playlist/:id', requireAdmin, (req, res) => {
+  db.prepare('UPDATE clips SET playlist = CASE COALESCE(playlist,0) WHEN 1 THEN 0 ELSE 1 END WHERE id=?').run(req.params.id);
+  res.redirect('/admin' + (req.get('referer')?.includes('all') ? '?all' : ''));
+});
+
+// public watch page — mods curate it from /admin, streamers open it on stream
+app.get('/playlist', (req, res) => {
+  const clips = db.prepare('SELECT id, slug, title, username, streamer FROM clips WHERE playlist=1 ORDER BY id').all();
+  const host = req.hostname;
+  const data = clips.map(c => ({ slug: c.slug, title: c.title, username: c.username, streamer: c.streamer || 'others' }));
+  res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>halvixiepie clip playlist</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#ffb62e">
+${STYLE}</head><body><div class="wrap wide">
+<header><div class="hex">▶</div>
+<h1>CLIP PLAYLIST<span class="sub">${clips.length ? clips.length + ' clips queued by the mods — click a clip or use Next' : 'Nothing queued yet'}</span></h1></header>
+${clips.length ? `<div class="plwrap">
+  <div class="plplayer"><iframe id="pl" allowfullscreen></iframe></div>
+  <div class="plctrl">
+    <button type="button" class="btn ghost" onclick="go(cur-1)">◀ Prev</button>
+    <button type="button" class="btn" onclick="go(cur+1)">Next ▶</button>
+    <span class="plcount" id="plcount"></span>
+  </div>
+  <ol class="pllist" id="pllist"></ol>
+</div>
+<script>
+const clips = ${JSON.stringify(data)};
+const parentHost = ${JSON.stringify(host)};
+let cur = -1;
+const list = document.getElementById('pllist');
+clips.forEach((c, i) => {
+  const li = document.createElement('li');
+  const num = document.createElement('span'); num.className = 'num'; num.textContent = String(i + 1).padStart(2, '0');
+  const t = document.createElement('span'); t.className = 't'; t.textContent = c.title;
+  const m = document.createElement('span'); m.className = 'm'; m.textContent = c.streamer + ' · sent by ' + c.username;
+  li.append(num, t, m);
+  li.onclick = () => go(i);
+  list.appendChild(li);
+});
+function go(i) {
+  if (!clips.length) return;
+  const first = cur === -1;
+  cur = (i + clips.length) % clips.length;
+  const c = clips[cur];
+  document.getElementById('pl').src = 'https://clips.twitch.tv/embed?clip=' + encodeURIComponent(c.slug)
+    + '&parent=' + encodeURIComponent(parentHost) + '&autoplay=' + (first ? 'false' : 'true');
+  document.getElementById('plcount').textContent = (cur + 1) + ' / ' + clips.length;
+  [...list.children].forEach((li, j) => li.classList.toggle('on', j === cur));
+  list.children[cur].scrollIntoView({ block: 'nearest' });
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') go(cur + 1);
+  if (e.key === 'ArrowLeft') go(cur - 1);
+});
+go(0);
+</script>` : `<div class="card">Mods haven't queued any clips yet. Check back later!</div>`}
+</div></body></html>`);
 });
 
 app.post('/admin/status/:id', requireAdmin, (req, res) => {
