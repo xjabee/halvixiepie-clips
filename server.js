@@ -200,7 +200,7 @@ app.get('/', (req, res) => {
   res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>halvixiepie clips</title>
-<meta property="og:title" content="halvixiepie clips 🍯">
+<meta property="og:title" content="halvixiepie clips 🎬">
 <meta property="og:description" content="Clip funny, amazing moments of your favorite streamers and get ₱${PAY_PER_CLIP} per clip!">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://clips.halvixiepie.online/">
@@ -210,8 +210,8 @@ app.get('/', (req, res) => {
 ${STYLE}</head><body><div class="wrap">
 <header><div class="hex">▶</div>
 <h1>SEND A CLIP<span class="sub">Submit your favorite moments for the weekly halvixiepie recap</span></h1></header>
-<div class="flash pay">🍯 <b>₱${PAY_PER_CLIP} per clip</b> — if your clip is chosen for the weekly recap video, you get ₱${PAY_PER_CLIP} sent to the QRPH/GCash QR you upload. Multiple chosen clips stack. Payouts go out after the recap is posted.</div>
-${ok ? `<div class="flash ok">Clip received! If it makes the recap, your QR gets the honey. 🍯</div>` : ''}
+<div class="flash pay">💸 <b>₱${PAY_PER_CLIP} per clip</b> — if your clip is chosen for the weekly recap video, you get ₱${PAY_PER_CLIP} sent to the QRPH/GCash QR you upload. Multiple chosen clips stack. Payouts go out after the recap is posted.</div>
+${ok ? `<div class="flash ok">Clip received! If it makes the weekly recap, you get paid ₱${PAY_PER_CLIP}.</div>` : ''}
 ${err ? `<div class="flash bad">${esc(err)}</div>` : ''}
 <form class="card" method="post" action="/submit" enctype="multipart/form-data">
   <label for="title">Clip title</label>
@@ -307,7 +307,7 @@ app.get('/admin', requireAdmin, (req, res) => {
 <body><div class="wrap wide"><header><div class="hex">▶</div>
 <h1>CLIP INBOX<span class="sub">${rows.length} ${showDone ? 'total' : 'new'} · downloads land in your browser's download folder</span></h1></header>
 <div class="actions" style="margin-bottom:20px">
-  <a class="btn" href="/admin/payout">🍯 Payouts${owed ? ` — ₱${owed} owed` : ''}</a>
+  <a class="btn" href="/admin/payout">💸 Payouts${owed ? ` — ₱${owed} owed` : ''}</a>
   <a class="btn ghost" href="${showDone ? '/admin' : '/admin?all'}">${showDone ? 'Show new only' : 'Show all statuses'}</a>
   <a class="btn ghost" href="/">View public form</a>
 </div>
@@ -369,8 +369,8 @@ app.get('/admin/payout', requireAdmin, (req, res) => {
     .map(h => `<div class="meta" style="margin-bottom:6px"><b style="color:var(--text)">${esc(h.name)}</b> — ₱${h.n * PAY_PER_CLIP} total (${h.n} clip${h.n > 1 ? 's' : ''}), last paid ${h.last ? new Date(h.last).toLocaleDateString() : '—'}</div>`).join('');
   res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>payouts</title>${STYLE}</head>
-<body><div class="wrap wide"><header><div class="hex">🍯</div>
-<h1>PAYOUTS<span class="sub">₱${PAY_PER_CLIP} per chosen clip · scan the QR, send the honey, then hit Mark paid</span></h1></header>
+<body><div class="wrap wide"><header><div class="hex">₱</div>
+<h1>PAYOUTS<span class="sub">₱${PAY_PER_CLIP} per chosen clip · scan the QR, send the payment, then hit Mark paid</span></h1></header>
 <div class="actions" style="margin-bottom:20px"><a class="btn ghost" href="/admin">← Back to inbox</a></div>
 ${rows || `<div class="card">Nobody is owed anything right now. Choose clips in the inbox and the tally shows up here.</div>`}
 ${rows ? `<div class="card" style="margin-top:6px;text-align:right"><span class="amt" style="font-family:Silkscreen;color:var(--honey)">Total owed: ₱${totalOwed}</span></div>` : ''}
