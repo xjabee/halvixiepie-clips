@@ -467,6 +467,9 @@ ${filterbar}
 <div class="actions" style="margin-bottom:20px">
   <a class="btn" href="/admin/payout">💸 Payouts${owed ? ` — ₱${owed} owed` : ''}</a>
   <a class="btn ghost" href="/playlist" target="_blank">▶ Playlist (${plCount})</a>
+  ${plCount ? `<form method="post" action="/admin/playlist-clear" style="display:inline" onsubmit="return confirm('Remove all ${plCount} clips from the playlist? The clips themselves stay in the inbox.')">
+    <button class="btn ghost" type="submit">🧹 Clear playlist</button>
+  </form>` : ''}
   <a class="btn ghost" href="/admin?${[showDone ? '' : 'all', sFilter ? 's=' + encodeURIComponent(sFilter) : ''].filter(Boolean).join('&')}">${showDone ? 'Show new only' : 'Show all statuses'}</a>
   <a class="btn ghost" href="/">View public form</a>
 </div>
@@ -541,6 +544,11 @@ app.post('/admin/payout/pay', requireAdmin, (req, res) => {
   db.prepare(`UPDATE clips SET status='paid', paid_at=? WHERE lower(username)=? AND status='chosen'`)
     .run(Date.now(), String(req.body.u || '').toLowerCase());
   res.redirect('/admin/payout');
+});
+
+app.post('/admin/playlist-clear', requireAdmin, (req, res) => {
+  db.prepare('UPDATE clips SET playlist=0 WHERE playlist=1').run();
+  res.redirect('/admin');
 });
 
 app.post('/admin/playlist/:id', requireAdmin, (req, res) => {
