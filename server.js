@@ -17,6 +17,29 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
 const PAY_PER_CLIP = Number(process.env.PAY_PER_CLIP || 20); // PHP per chosen clip
 const STREAMERS = (process.env.STREAMERS || 'xjabee,itshoneypie__,halcyon_aurora,elovixie,idlecai')
   .split(',').map(s => s.trim()).filter(Boolean); // the stream circle; everything else files under "others"
+const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL || '';
+
+// fire-and-forget Discord ping when a clip lands
+function notifyDiscord(c) {
+  if (!DISCORD_WEBHOOK) return;
+  fetch(DISCORD_WEBHOOK, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      embeds: [{
+        title: '🎬 New clip submitted: ' + c.title,
+        url: c.url,
+        color: c.streamer === 'others' ? 0xe0685c : 0xffb62e,
+        fields: [
+          { name: 'Stream', value: c.streamer + (c.streamer === 'others' && c.broadcaster ? ` (${c.broadcaster})` : ''), inline: true },
+          { name: 'Sent by', value: c.username, inline: true }
+        ],
+        footer: { text: 'clips.halvixiepie.online' },
+        timestamp: new Date().toISOString()
+      }]
+    })
+  }).catch(e => console.warn('discord webhook failed:', e.message));
+}
 
 if (!ADMIN_PASSWORD) console.warn('[warn] ADMIN_PASSWORD is not set — /admin will refuse all logins.');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -368,6 +391,7 @@ app.post('/submit', (req, res) => {
     const qrHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(UPLOAD_DIR, req.file.filename))).digest('hex');
     db.prepare('INSERT INTO clips (title,url,slug,username,qr_file,qr_hash,streamer,broadcaster,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
       .run(title.trim().slice(0, 120), String(url).trim(), slug, username.trim().slice(0, 40), req.file.filename, qrHash, streamer, broadcaster, Date.now());
+    notifyDiscord({ title: title.trim().slice(0, 120), url: String(url).trim(), username: username.trim().slice(0, 40), streamer, broadcaster });
     res.redirect('/?ok');
   });
 });
